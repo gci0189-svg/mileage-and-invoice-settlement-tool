@@ -4,6 +4,7 @@ import re
 import pytesseract
 from PIL import Image
 import fitz  # PyMuPDF 套件，用來處理 PDF
+from collections import Counter # 新增：用來統計數字池
 
 # --- 網頁基本設定 ---
 st.set_page_config(page_title="🚗 公司里程津貼與發票結算工具", page_icon="🧾", layout="centered")
@@ -18,58 +19,74 @@ total_allowance = st.number_input("請輸入本月「總里程津貼」金額：
 uploaded_files = st.file_uploader("請上傳加油發票 (支援 PDF, JPG, PNG)", accept_multiple_files=True, type=['png', 'jpg', 'jpeg', 'pdf'])
 
 def extract_invoice_data(text):
-    """使用『雙重確認比對法』：底部(銷售額+稅額=總計) + 頂部(總計) 交互印證"""
+    """無視排版的『數字池 (Number Pool)』校驗法"""
     # 清除雜訊
     text_clean = text.replace(" ", "").replace(",", "").replace("元", "").replace("ㄦ", "")
     
     amounts_list = []
-    taxes_list = []
-    details_list =[] # 用來記錄比對成功的詳細過程給使用者看
-    used_indices = set()
+    taxes_list =[]
+    details_list =[]
     
-    # 將所有 OCR 抓到的數字全部列出來
+    # 【超級核心】：將畫面上「所有」的數字抓出來，丟進數字池
     all_numbers =[int(x) for x in re.findall(r'\d+', text_clean)]
+    num_counts = Counter(all_numbers) # 計算每個數字出現的次數
     
-    # 核心邏輯：在數字串中尋找連續的三個數字 A(銷售額) B(稅額) C(底部總計)
-    for i in range(len(all_numbers) - 2):
-        if i in used_indices or i+1 in used_indices or i+2 in used_indices:
-            continue
+    # 假設合理的發票總計在 50 ~ 50000 之間
+    potential_totals =[n for n in all_numbers if 50 <= n <= 50000]
+    potential_totals.sort(reverse=True) # 從大金額開始核對
+    
+    for C in potential_totals:
+        if num_counts[C] <= 0:
+            continue # 這個數字已經被用掉了
             
-        n1 = all_numbers[i]   # 疑似銷售額
-        n2 = all_numbers[i+1] # 疑似稅額
-        n3 = all_numbers[i+2] # 疑似底部總計
+        # 計算這筆總計「應有」的稅額 (台灣營業稅 5%)
+        expected_tax_exact = C - (C / 1.05)
         
-        # 條件一：底部算式相符 (銷售額 + 稅額 == 總計)
-        if n1 + n2 == n3 and 100 <= n3 <= 20000:
-            # 條件二：符合台灣 5% 營業稅規則
-            expected_tax = n3 - round(n3 / 1.05)
-            if abs(n2 - expected_tax) <= 1:
-                
-                # 🎯 條件三：【多重確認比對】
-                # 往回頭找，看看這張發票「頂部」是不是也出現過一模一樣的總計數字
-                top_total_found = False
-                # 往前尋找最近的 30 個數字
-                for j in range(i-1, max(-1, i-30), -1):
-                    if all_numbers[j] == n3:
-                        top_total_found = True
-                        break
-                
-                # 記錄結果
-                amounts_list.append(n3)
-                taxes_list.append(n2)
-                
-                # 根據比對結果，顯示不同的提示
-                if top_total_found:
-                    details_list.append(f"✅ **{n3}元** (雙重比對成功：頂部相符，且底部明細 {n1} + {n2} = {n3})")
-                else:
-                    details_list.append(f"⚠️ **{n3}元** (單一比對成功：僅確認底部明細 {n1} + {n2} = {n3})")
+        # 容許 1 元的進位誤差 (四捨五入、無條件進位/捨去)
+        possible_taxes = list(set([math.floor(expected_tax_exact), math.ceil(expected_tax_exact), round(expected_tax_exact)]))
+        
+        match_found = False
+        for B in possible_taxes:
+            if match_found: break
+            A = C - B # 推算出應有的銷售額
+            
+            # 模擬從池子裡拿出 A, B, C 這三個數字
+            temp_counts = num_counts.copy()
+            temp_counts[C] -= 1
+            
+            # 如果池子裡同時存在對應的 A(銷售額) 跟 B(稅額)，這就是一張發票！
+            if temp_counts.get(A, 0) > 0:
+                temp_counts[A] -= 1
+                if temp_counts.get(B, 0) > 0:
+                    temp_counts[B] -= 1
                     
-                used_indices.update([i, i+1, i+2])
-                
+                    # 成功拼湊出一張發票！正式消耗掉這三個數字
+                    num_counts = temp_counts 
+                    amounts_list.append(C)
+                    taxes_list.append(B)
+                    
+                    # 檢查頂部有沒有出現過一模一樣的總計 (雙重確認)
+                    if Counter(all_numbers)[C] >= 2:
+                        details_list.append(f"✅ **{C}元** (雙重比對成功：找到明細 {A} + {B} = {C}，且頂部總額吻合)")
+                    else:
+                        details_list.append(f"✅ **{C}元** (比對成功：找到明細 {A} + {B} = {C})")
+                        
+                    match_found = True
+
+    # 備用防呆：如果稅額真的糊到讀不出來，退回使用中文字抓取
+    fallback_matches = re.findall(r'(?:總[計部額]|合計)[:：\.\s]*(\d{3,5})', text_clean)
+    for m in fallback_matches:
+        val = int(m)
+        if 50 <= val <= 50000 and val not in amounts_list:
+            tax = val - round(val / 1.05)
+            amounts_list.append(val)
+            taxes_list.append(tax)
+            details_list.append(f"⚠️ **{val}元** (備用機制：僅找到總計字樣，稅額為公式反推)")
+
     return sum(amounts_list), sum(taxes_list), amounts_list, taxes_list, details_list, text
 
 # 3. 執行按鈕
-if st.button("🚀 開始辨識與多重比對", type="primary"):
+if st.button("🚀 開始辨識與結算", type="primary"):
     total_gas_amount = 0
     total_tax_amount = 0
     
@@ -78,7 +95,7 @@ if st.button("🚀 開始辨識與多重比對", type="primary"):
     else:
         st.write("### 🧾 發票辨識明細")
         
-        with st.spinner('啟動多重比對引擎辨識中，請稍候...'):
+        with st.spinner('啟動智慧數字池引擎辨識中，請稍候...'):
             for file in uploaded_files:
                 try:
                     # 【處理 PDF 檔案】
@@ -90,26 +107,26 @@ if st.button("🚀 開始辨識與多重比對", type="primary"):
                         
                         for page_num in range(len(doc)):
                             page = doc.load_page(page_num)
-                            pix = page.get_pixmap(dpi=300) # 高畫質轉換
+                            pix = page.get_pixmap(dpi=300)
                             image = Image.frombytes("RGB",[pix.width, pix.height], pix.samples)
                             
-                            text = pytesseract.image_to_string(image, lang='chi_tra')
+                            # 加上 config='--psm 11' 強迫 AI 把文字切成一塊一塊看，專治並排排版
+                            text = pytesseract.image_to_string(image, lang='chi_tra', config='--psm 11')
                             amount, tax, amounts_list, taxes_list, details_list, raw_text = extract_invoice_data(text)
                             
                             if amount > 0:
                                 st.success(f" - 第 {page_num + 1} 頁：精準抓到 **{len(amounts_list)}** 張發票！本頁總計 **{amount}** 元 / 稅額 **{tax}** 元")
-                                # 顯示多重比對的結果
                                 for detail in details_list:
                                     st.info(detail)
                                 total_gas_amount += amount
                                 total_tax_amount += tax
                             else:
-                                st.error(f" - 第 {page_num + 1} 頁：自動辨識失敗，可能是圖片不夠清晰或排版特殊。")
+                                st.error(f" - 第 {page_num + 1} 頁：自動辨識失敗，請確認圖片清晰度。")
                                 
                     # 【處理一般圖片檔案】
                     else:
                         image = Image.open(file)
-                        text = pytesseract.image_to_string(image, lang='chi_tra')
+                        text = pytesseract.image_to_string(image, lang='chi_tra', config='--psm 11')
                         amount, tax, amounts_list, taxes_list, details_list, raw_text = extract_invoice_data(text)
                         
                         if amount > 0:
