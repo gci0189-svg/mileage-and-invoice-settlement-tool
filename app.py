@@ -3,7 +3,8 @@ import math
 import re
 import pytesseract
 from PIL import Image
-import fitz  # PyMuPDF 套件，用來處理 PDF
+import fitz  # PyMuPDF
+from collections import Counter
 
 # --- 網頁基本設定 ---
 st.set_page_config(page_title="🚗 公司里程津貼與發票結算工具", page_icon="🧾", layout="centered")
@@ -18,88 +19,63 @@ total_allowance = st.number_input("請輸入本月「總里程津貼」金額：
 uploaded_files = st.file_uploader("請上傳加油發票 (支援 PDF, JPG, PNG)", accept_multiple_files=True, type=['png', 'jpg', 'jpeg', 'pdf'])
 
 def extract_invoice_data(text):
-    """結合「台灣法定稅率公式」與「鄰近區塊法則」的終極校驗法"""
-    text_clean = text.replace(" ", "").replace(",", "").replace("元", "").replace("ㄦ", "")
+    """【終極無敵版】絕對數學池演算法：只相信 100% 吻合的台灣法定稅率組合"""
+    # 清理所有文字雜訊與換行
+    text_clean = text.replace(" ", "").replace(",", "").replace("元", "").replace("ㄦ", "").replace("\n", "")
     
     amounts_list = []
-    taxes_list =[]
+    taxes_list = []
     details_list =[]
     
-    # 提取畫面上所有的數字，並記錄它們的先後順序
-    number_matches =[int(m.group()) for m in re.finditer(r'\d+', text_clean)]
-    used_indices = set()
+    # 1. 將畫面上所有的獨立數字抓出來，丟進「數字池」
+    all_numbers = [int(m.group()) for m in re.finditer(r'\d+', text_clean)]
+    pool = Counter(all_numbers) # 計算每個數字出現的次數
     
-    # 限制 A, B, C 這三個數字，必須在連續的 25 個數字之內 (防止跨行亂湊)
-    WINDOW_SIZE = 25 
+    # 將所有可能的總計金額從大排到小 (過濾掉 100 以下的雜亂數字)
+    potential_cs = sorted([n for n in all_numbers if 100 <= n <= 50000], reverse=True)
     
-    # 【第一階段】：嚴格比對 A(銷售額) + B(稅額) = C(總計)
-    for i in range(len(number_matches)):
-        if i in used_indices: continue
+    # 【核心】：在數字池中尋找完美的 A + B = C
+    for C in potential_cs:
+        # 如果這個數字已經被其他發票用掉了，就跳過
+        if pool[C] <= 0:
+            continue
+            
+        # 依照台灣營業稅法規，計算絕對稅額 (總計 / 21 傳統四捨五入)
+        expected_tax = math.floor(C / 21.0 + 0.5)
+        B = expected_tax
+        A = C - B
         
-        window = number_matches[i:i+WINDOW_SIZE]
-        match_found = False
+        # 暫時從池子裡拿走一個 C，看看能不能配對成功
+        pool[C] -= 1
         
-        for idx_c in range(len(window)):
-            for idx_b in range(len(window)):
-                for idx_a in range(len(window)):
-                    # 必須是三個不同的數字
-                    if len(set([idx_a, idx_b, idx_c])) == 3:
-                        A = window[idx_a]
-                        B = window[idx_b]
-                        C = window[idx_c]
-                        
-                        # 條件一：加總正確且總計 >= 100 (過濾掉零星的小數字)
-                        if C >= 100 and A + B == C:
-                            # 條件二：【台灣發票絕對公式】 稅額必須完美等於 (總計 / 21) 的傳統四捨五入
-                            expected_tax = math.floor(C / 21.0 + 0.5)
-                            
-                            if B == expected_tax:
-                                global_a = i + idx_a
-                                global_b = i + idx_b
-                                global_c = i + idx_c
-                                
-                                if global_a not in used_indices and global_b not in used_indices and global_c not in used_indices:
-                                    amounts_list.append(C)
-                                    taxes_list.append(B)
-                                    used_indices.update([global_a, global_b, global_c])
-                                    details_list.append(f"✅ **{C}元** (精準區塊比對：明細 {A} + 稅額 {B} = 總計 {C})")
-                                    match_found = True
-                                    break
-                if match_found: break
-            if match_found: break
-
-    # 【第二階段】：容錯比對 (如果 OCR 看不清楚銷售額 A，只要 B 和 C 完美符合公式也算對！)
-    for i in range(len(number_matches)):
-        if i in used_indices: continue
-        
-        window = number_matches[i:i+WINDOW_SIZE]
-        match_found = False
-        
-        for idx_c in range(len(window)):
-            for idx_b in range(len(window)):
-                if idx_c != idx_b:
-                    B = window[idx_b]
-                    C = window[idx_c]
-                    
-                    if C >= 100:
-                        expected_tax = math.floor(C / 21.0 + 0.5)
-                        if B == expected_tax:
-                            global_b = i + idx_b
-                            global_c = i + idx_c
-                            
-                            if global_b not in used_indices and global_c not in used_indices:
-                                amounts_list.append(C)
-                                taxes_list.append(B)
-                                used_indices.update([global_b, global_c])
-                                details_list.append(f"⚠️ **{C}元** (容錯區塊比對：找到相鄰稅額 {B} 與總計 {C})")
-                                match_found = True
-                                break
-            if match_found: break
-
+        # 奇蹟時刻：如果池子裡剛好有對應的銷售額 A 跟稅額 B
+        if pool[A] > 0 and pool[B] > 0:
+            # 完美配對！把 A 跟 B 也從池子裡消耗掉
+            pool[A] -= 1
+            pool[B] -= 1
+            
+            amounts_list.append(C)
+            taxes_list.append(B)
+            details_list.append(f"✅ **{C}元** (精準數學比對：銷售額 {A} + 稅額 {B} = 總計 {C})")
+        else:
+            # 配對失敗 (例如地址206找不到對應的196)，把 C 放回池子裡
+            pool[C] += 1
+            
+    # 【防呆備用】：如果 PDF 是掃描圖檔導致銷售額糊掉，用明確的「總計」關鍵字撈回
+    explicit_totals = re.findall(r'(?:總[計部額]|合計|金額)[:：\.\s]*(\d{3,5})', text_clean)
+    for t_str in explicit_totals:
+        val = int(t_str)
+        # 確保不會跟已經算過的發票重複
+        if 100 <= val <= 50000 and val not in amounts_list:
+            tax = math.floor(val / 21.0 + 0.5)
+            amounts_list.append(val)
+            taxes_list.append(tax)
+            details_list.append(f"⚠️ **{val}元** (關鍵字比對：發現未列入明細的總計 {val})")
+            
     return sum(amounts_list), sum(taxes_list), amounts_list, taxes_list, details_list, text
 
 # 3. 執行按鈕
-if st.button("🚀 開始辨識與結算", type="primary"):
+if st.button("🚀 開始智慧結算", type="primary"):
     total_gas_amount = 0
     total_tax_amount = 0
     
@@ -108,7 +84,7 @@ if st.button("🚀 開始辨識與結算", type="primary"):
     else:
         st.write("### 🧾 發票辨識明細")
         
-        with st.spinner('啟動智慧引擎解析中，請稍候...'):
+        with st.spinner('啟動終極數字池解析中，請稍候...'):
             for file in uploaded_files:
                 try:
                     # 【處理 PDF 檔案】
@@ -120,12 +96,9 @@ if st.button("🚀 開始辨識與結算", type="primary"):
                         
                         for page_num in range(len(doc)):
                             page = doc.load_page(page_num)
+                            text = page.get_text("text") # 優先讀取原生 PDF 文字
                             
-                            # 優先嘗試：原生 PDF 文字提取 (速度最快、0 誤差)
-                            text = page.get_text("text")
-                            
-                            # 若抓不到文字 (代表是掃描圖片檔)，啟動 OCR 視覺辨識
-                            if len(text.strip()) < 50:
+                            if len(text.strip()) < 50: # 如果是純圖片 PDF 才啟動 OCR
                                 pix = page.get_pixmap(dpi=300)
                                 image = Image.frombytes("RGB",[pix.width, pix.height], pix.samples)
                                 text = pytesseract.image_to_string(image, lang='chi_tra', config='--psm 11')
@@ -137,10 +110,7 @@ if st.button("🚀 開始辨識與結算", type="primary"):
                             
                             if amount > 0:
                                 st.success(f" - 第 {page_num + 1} 頁：成功抓到 **{len(amounts_list)}** 張發票！本頁總計 **{amount}** 元 / 稅額 **{tax}** 元")
-                                if ocr_used:
-                                    st.caption("🔍 解析模式：AI 視覺辨識 (OCR)")
-                                else:
-                                    st.caption("⚡ 解析模式：原生 PDF 數位解析 (100%精準)")
+                                if not ocr_used: st.caption("⚡ 解析模式：原生 PDF 數位解析 (100%精準)")
                                     
                                 for detail in details_list:
                                     st.info(detail)
