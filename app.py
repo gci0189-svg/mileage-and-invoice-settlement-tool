@@ -4,7 +4,6 @@ import re
 import pytesseract
 from PIL import Image
 import fitz  # PyMuPDF
-from collections import Counter
 
 # --- 網頁基本設定 ---
 st.set_page_config(page_title="🚗 公司里程津貼與發票結算工具", page_icon="🧾", layout="centered")
@@ -20,15 +19,15 @@ uploaded_files = st.file_uploader("請上傳加油發票 (支援 PDF, JPG, PNG)"
 
 def extract_invoice_data(text):
     """【終極 Spec 實作】先抓銷售額與總計比對 -> 推算稅額 -> 獨立加總"""
-    # 清理所有文字雜訊
-    text_clean = text.replace(" ", "").replace(",", "").replace("元", "").replace("ㄦ", "").replace("\n", "")
+    # ⚠️ 關鍵修正：保留空格與換行符號，防止不同行的數字黏在一起
+    text_clean = text.replace(",", "").replace("元", "").replace("ㄦ", "")
     
     amounts_list = [] # 總計
     sales_list =[]   # 銷售額
-    taxes_list = []   # 稅額
+    taxes_list =[]   # 稅額
     details_list =[] # 顯示給使用者的明細
     
-    # 抓取畫面上所有的數字
+    # 抓取畫面上所有的獨立數字
     matches = list(re.finditer(r'\d+', text_clean))
     numbers = [int(m.group()) for m in matches]
     used_indices = set()
@@ -45,7 +44,6 @@ def extract_invoice_data(text):
         # 總計合理範圍
         if 50 <= C <= 50000:
             # 依照法定稅率 (5%) 反推「應有」的稅額與銷售額
-            # 稅額 = 總計 / 21 (四捨五入)
             expected_tax = math.floor(C / 21.0 + 0.5)
             expected_sales = C - expected_tax
             
@@ -70,7 +68,6 @@ def extract_invoice_data(text):
                     break
 
     # 【階段二：單星容錯防呆】
-    # 萬一 OCR 真的把銷售額糊成一團，我們用明確的「總計」中文字樣作為最後保險
     fallback_matches = re.finditer(r'(?:總[計部額]|合計|應收金額)[:：\.\s]*(\d{3,5})', text_clean)
     for m in fallback_matches:
         val = int(m.group(1))
@@ -158,13 +155,11 @@ if st.button("🚀 開始智慧結算", type="primary"):
         # 4. 結算與獨立加總驗證
         st.write("### 📊 本月結算總表 (分離驗算機制)")
         
-        # 顯示您要求的「分開加總」結果
         col1, col2, col3 = st.columns(3)
         col1.metric(label="✅ 總銷售額 (獨立加總)", value=f"{total_sales_amount} 元")
         col2.metric(label="✅ 總稅額 (獨立加總)", value=f"{total_tax_amount} 元")
         col3.metric(label="🎯 驗算: 總加油金額", value=f"{total_gas_amount} 元")
         
-        # 驗算防呆檢查
         if total_sales_amount + total_tax_amount == total_gas_amount:
             st.caption("✨ 系統驗算通過：總銷售額 + 總稅額 = 總加油金額 (誤差 $0)")
         else:
